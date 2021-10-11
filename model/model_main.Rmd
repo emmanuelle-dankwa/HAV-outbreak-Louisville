@@ -1,0 +1,1375 @@
+---
+title: "Hepatitis A transmission among persons who experience homelessness or who use drugs in Louisville (2017-2019 hepatitis A outbreak) - Model"
+author: "Emmanuelle Dankwa (dankwa@stats.ox.ac.uk)"
+date: "08/10/2021"
+output: html_document
+---
+
+
+# Set up
+
+1. Load packages, functions and data.
+
+<!-- NOTE: Please set directory to the "model" folder. -->
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+# Load packages 
+
+library(lhs)       # Latin Hypercube sampling 
+library(nloptr)    # Optimization
+library(deSolve)   # Solving systems of ordinary differential equations
+library(ggplot2)   # Plotting 
+library(sensobol)  # Sobol' sensitivity analysis
+
+
+# Load functions  
+source("model_functions.R")     # All analysis functions are written in this file
+
+# Load data 
+casecountperwk <- readRDS(file="./model_data/casecountperwk.RDS") # observed case count
+vaccdata <- readRDS(file = "./model_data/vaccdata.RDS")           # vaccination data
+```
+
+
+2. Generate Latin Hypercube sample for population size (see Section on "Parameter estimation" and Supplementary Section S3).
+
+```{r n-vec-1}
+##### LATIN HYPERCUBE SAMPLE (LHS) FOR POPULATION SIZE #####
+
+# See Section S3 of Supplementary material for references on percentages and figures.
+
+# Total population size
+pop.size <- 658811            
+
+# Bounds on size of drug-using population
+
+min.drug.users <- floor(prod(pop.size, 0.0872))  
+max.drug.users <- floor(prod(pop.size, 0.1195)) 
+
+
+# Bounds on size of PEH/PWUD population
+
+homeless.n <- 6695
+homeless.and.drug.using.n <- round(0.735*(homeless.n))
+min.hpwud <- homeless.n + min.drug.users - homeless.and.drug.using.n  
+max.hpwud <- homeless.n + max.drug.users - homeless.and.drug.using.n  
+
+
+# Generate LHS vector for PEH/PWUD population
+
+set.seed(1432)                                   # for reproducibility
+LHS <- randomLHS(n = 1000, k = 1)
+N_vec <- as.vector(qunif(LHS, min.hpwud, max.hpwud))
+
+
+# Save to results folder:
+saveRDS(N_vec, file = "./results/N_vec.RDS")
+```
+
+```{r n-vec-2 , eval = FALSE}
+# Load result from previous chunk
+N_vec <- readRDS(file = "./results/N_vec.RDS")
+```
+
+
+# Parameter estimation
+
+## Parameters to be estimated
+
+We estimate the following parameters by maximum likelihood estimation (MLE) assuming a Poisson likelihood for the observed data.
+
+
+* $I_0$ (number of infected individuals in week 0)
+
+
+* $\beta$  (transmission rate)
+
+We implement a time-varying $\beta$ of the form of a sigmoidal function: 
+
+\begin{equation}
+\beta = a + (b-a)/(1+exp(-c(t-d))),
+\end{equation}
+
+where $t$ is time and 
+
++ $a$ ($\beta_s$ in manuscript) 
++ $b$ ($\beta_l$ in manuscript) 
++ $c$ ($c$ in manuscript)
++ $d$ ($t^*$ in manuscript)
+
+are parameters. See Table 1 in Main text. 
+
+
+## Perform MLE
+
+```{r parameter-estimation}
+## All parameters
+parameters <- c("a",  "b", "c",  "d", "I0", "durL", 'durI', 'fracImmune', 'durRem', 'propRelapse', "omega") # The order matters! 
+
+#durL = duration of latent period
+#durI = duration of infectious period
+#fracImmune = fraction of immune individuals at the start of the outbreak
+#durRem = duration of remission period
+#propRelapse = probability of experiencing a relapse
+#omega = fraction of vaccine doses given to at-risk individuals 
+
+
+## Estimated parameters
+estimated_parameters <- c("a",  "b", "c", "d", "I0")
+
+
+
+# Fixed parameter values
+fixed_parameters <- c('durL', 'durI', 'fracImmune', 'durRem', 'propRelapse', "omega")  
+fixed_parameter_values <- c(1.57, 4.64, 0.43, 4.3, 0.11, 1)     # See Table 1 in main text
+fixed_params <- data.frame(fixed_parameter_values, row.names = fixed_parameters)
+
+```
+
+```{r parameter-estimation-2}
+
+# Set limits for parameters to be estimated 
+estimated_parameters <- c("a",     "b",   "c",  "d",  "I0" )
+lower <- c(                1e-2, 1e-2,   0.05,   1,   0.50)
+upper <- c(                  5,      5,  3,      60,     5 )
+x0 <- c(                    0.50, 0.50, 0.50, 35,  0.50)
+
+
+
+# Perform estimation 
+param_estims <- nloptr::bobyqa(x0 = log(x0),
+                               lower = log(lower),
+                               upper = log(upper),
+                               fn = calib.function,    # in all_functions.R
+                               nl.info = F,           
+                               N = mean(N_vec),
+                               ydata = casecountperwk)
+
+
+# View results
+#param_estims;
+#exp(param_estims$par)
+
+# Save parameter estimates
+saveRDS(param_estims, file = "./results/param_estims.RDS")
+```
+
+```{r parameter-estimation-3, eval=FALSE}
+param_estims <- readRDS(file = "./results/param_estims.RDS")
+
+
+# Display results
+knitr::kable(data.frame(Parameter = parameters[1:length(estimated_parameters)],
+                        MLE =   exp(param_estims$par)))
+```
+
+
+
+
+## Profile likelihood-based confidence intervals for estimated parameters
+
+1. Compute profile curves. 
+
+```{r profile-likelihood-based-confidence-intervals}
+
+##### COMPUTE PROFILE LIKELIHOOD (PL) CURVES FOR ESTIMATED PARAMETERS ##########
+
+# IMPLEMENTATION NOTE: COMPUTATION SLOW DUE TO SEVERAL OPTIMIZATION STEPS. ADVISED TO RUN ON A CLUSTER FOR SPEED
+
+
+#  Set optimization bounds for parameters. Fixed parameters have 'NA' entries.
+parameters <- c("a",    "b",  "c", "d", "I0", "durL", 'durI', 'fracImmune', 'durRem', 'propRelapse', "omega") # Repeated here for ease of reference
+upper.cal <- c( 5,      5,   2,    60,   5,     NA,      NA,    NA,              NA,            NA,   NA)     # Upper optimization bound (NA for fixed parameters) 
+lower.cal <- c( 1e-3, 1e-3,   0.1,  30,  0.1,   NA,      NA,    NA,              NA,            NA,    NA)    # Lower optimization bound (NA for fixed parameters)
+
+
+# Identify indices of fixed parameters
+ind <- c()
+for (fixed_parameter in fixed_parameters) {
+  ind <- c(ind, which(parameters==fixed_parameter))
+}
+
+# Parameter estimates 
+# param_estims <- readRDS(file = "./results/param_estims.RDS")   # Load parameter estimates 
+opt2 <- exp(param_estims$par)
+opt2 
+
+
+# Insert corresponding fixed values based on positions
+
+for (i in 1:length(ind)){
+  full_vector <- R.utils::insert(opt2, ind[i], fixed_parameter_values[i])
+  full_vector -> opt2
+}
+
+# Construct summary data frame
+pul <- data.frame(parameter = parameters,
+                  lower.bound = lower.cal,
+                  upper.bound = upper.cal,
+                  index = 1:length(parameters),
+                  opt = full_vector)
+pul <-  fix.parameters(to_fix = fixed_parameters,
+                       fixed_values = fixed_parameter_values)
+
+
+
+#### PL COMPUTATONS FOR PARAMETERS ####
+
+chain <- T   # Use chain-like algorithm where the parameter estimates at the previous iteration is used as starting point at the current iteration.
+
+
+res1 <- pl_function(p.vec = "a",
+                    pvl = list(a = seq(0.45,
+                                       0.90,
+                                       by = 0.01)))
+#save(res1,  file = "./results/res1.rda")
+
+
+
+res2 <- pl_function(p.vec = "b",
+                    pvl = list(b = c(seq(0.01,
+                                         0.30,
+                                         by  = 0.01))))
+#save(res2, file = "./results/res2.rda")
+
+
+
+res3 <- pl_function(p.vec = "c",
+                    pvl = list(c = seq(0.01,
+                                       5,
+                                       by = 0.01)))
+#save(res3, file = "./results/res3.rda")
+
+
+res4 <- pl_function(p.vec = "d",
+                    pvl = list(d = seq(25,
+                                       45,
+                                       by = 0.10)))
+#save(res4, file = "./results/res4.rda")
+
+
+res5 <- pl_function(p.vec = "I0",
+                    pvl = list(I0 = seq(0.05,
+                                        2.5,
+                                        by = 0.01)))
+#save(res5, file = "./results/res5.rda")
+
+
+# Save to file 
+parameter_profiles <- list(res1, res2, res3, res4, res5)
+saveRDS(parameter_profiles, file = "./results/parameter_profiles.RDS") 
+```
+
+```{r profile-likelihood-based-confidence-intervals-2, eval = FALSE}
+# Load results from previous chunk
+parameter_profiles <- readRDS(file = "./results/parameter_profiles.RDS")   # Load parameter estimates 
+
+```
+
+2. Profile-likelihood-based confidence intervals for parameter estimates
+
+```{r confidence-intervals}
+
+#### COLLECT PROFILE RESULTS  #####
+profile_results <- lapply(parameter_profiles, function (x) profile_function(x, log=F, plot=FALSE)) 
+
+
+##### COMPUTE CONFIDENCE INTERVALS #####
+
+min_llk <- param_estims$value                                         # Minimum negative log likelihood value
+cutoff <- min_llk + qchisq(p=0.95,df=length(estimated_parameters))/2  # Cut off
+
+#min_llk;cutoff
+
+# 95% simultaneous confidence intervals:
+ci<- data.frame(matrix(NA, nrow= length(estimated_parameters), ncol = 2), row.names = estimated_parameters)
+for (i in c(1:length(estimated_parameters))){
+  ci[i, 1:2] <- range(subset(profile_results[[i]]$df, llk_values<cutoff)$profile_values)
+}
+
+ci$opt <- exp(param_estims$par)  # parameter estimates
+colnames(ci) <- c("95%lower", "95%upper", "MLE_estimate")
+
+# Display
+knitr::kable(ci)
+```
+
+
+## Compute confidence intervals for epidemic trajectory
+
+```{r steps, eval=FALSE}
+# Note: computationally intensive
+
+# Steps 
+#1. Sample LHS from the parameter space 
+#2. For each parameter combination, compute the model trajectory and the likelihood
+#3. Keep the likelihoods that are below the confidence cutoff
+#4. Plot min and max 
+
+```
+
+```{r steps1-2}
+#*STEPS 1-2*#
+#### COMPUTE OUTBREAK TRAJECTORIES (RECORD LIKELIHOOD VALUES) #####
+
+# Steps 
+#1. Sample LHS 
+#2. For each parameter combination, compute the model trajectory and the likelihood
+
+
+
+#### 1. Sample LHS ###
+inputs <- c('a',
+            'b',
+            "c",
+            "d",
+            "I0",
+            "N")
+
+#Set seed for reproducibility
+
+set.seed(1432)
+LHS <- randomLHS(n = 10000, k = length(inputs))
+colnames(LHS) <- inputs
+
+
+# LHS matrix
+
+LHS[, "a"] <- qunif(LHS[, "a"], 0.52, 0.82)
+LHS[, "b"] <- qunif(LHS[, "b"], 0.03, 0.19)
+LHS[, "c"] <- qunif(LHS[, "c"], 0.60, 1.00)
+LHS[, "d"] <- qunif(LHS[, "d"], 31, 40)   
+LHS[, "I0"] <- qunif(LHS[, "I0"], 0.10, 2.30)
+LHS[, "N"] <- qunif(LHS[, "N"], 59222, 80501)
+
+### 2. For each parameter combination, compute the model trajectory and the likelihood ###
+
+trajectory_for_all_combinations <- calc.mod.estims(x = LHS, 
+                                                   compute.likelihood = TRUE,
+                                                   sensitivity.analysis = FALSE,
+                                                   nsim = 10000)
+
+# Save
+saveRDS(trajectory_for_all_combinations, file = "./results/trajectory_for_all_combinations.RDS")
+```
+
+```{r steps1-2-2, eval = FALSE}
+#  Load results from previous chunk
+trajectory_for_all_combinations <- readRDS("./results/trajectory_for_all_combinations.RDS")
+```
+
+
+```{r step3}
+#*STEP 3*#
+# 3. Keep the likelihoods that are below the confidence cutoff
+keep_indices <- which(trajectory_for_all_combinations$NLLK < cutoff)
+#summary(trajectory_for_all_combinations$NLLK)
+
+# Obtain trajectories that satisfy the likelihood cutoff
+traj_less_than_cutoff <- trajectory_for_all_combinations$FC[, keep_indices]
+```
+
+
+# Plot model best fit and 95% confidence interval
+
+
+```{r model-plot}
+
+###### PLOT MODEL FIT AND CONFIDENCE REGION ###########
+
+param_values <-  matrix(c(ci$MLE_estimate, mean(N_vec)),  nrow = 1, ncol = length(estimated_parameters) +1)
+colnames(param_values) <- c(estimated_parameters, "N")
+
+mle_fit <- calc.mod.estims(x = param_values, 
+                           fp = fixed_params,
+                           sensitivity.analysis = FALSE,
+                           nsim = 1, 
+                           compute.likelihood = TRUE)
+
+
+# Organize data into frame
+
+df_model <- data.frame(week = c(1:length(casecountperwk)),
+                       model = as.vector(mle_fit$FC),
+                       low = as.vector(apply(traj_less_than_cutoff , 1, min)), 
+                       high = as.vector(apply(traj_less_than_cutoff , 1, max)), 
+                       middle = as.vector(apply(traj_less_than_cutoff , 1, quantile, probs = c(0.50))),
+                       observed = casecountperwk)
+
+# Save
+saveRDS(df_model, file = "./results/df_model.RDS")
+
+```
+
+
+```{r model-plot-2, eval = FALSE}
+
+# Load results from previous chunk
+
+df_model <- readRDS(file = "./results/df_model.RDS")
+
+```
+
+
+```{r model-plot-3, fig.align ="center", fig.cap = "Model fit (blue line) to weekly case counts of detected cases of hepatitis A among 42 persons experiencing homelessness or who use drugs in Louisville (black dots). Shaded area is 43 the 95% confidence region for the model estimates (Figure 3A)", fig.height= 5}
+
+# Plot
+
+model_fit_plot <- ggplot(df_model, aes(x = week, y=observed))+
+  geom_point(shape = 19, size = 2, (aes(color="Data"))) +
+  geom_ribbon(aes(x=week, ymin=low, ymax = high), fill = "lightblue", alpha = 0.6) +
+  geom_line(aes(x= week, y = model, color = "Model"), lwd = 1) +
+  scale_colour_manual(name='', values=c("Data" ="black", "Model"= "darkblue")) +
+  guides(colour = guide_legend(override.aes = list(shape=c(16,NA),  linetype=c(NA,1)))) +
+  labs(x = "Time (weeks)", y = "Number of detected incident cases") +
+  #scale_x_continuous(limits=c(0, 14), breaks=c(0,7,14)) +
+  scale_y_continuous(limits=c(0,30), breaks=c(seq(0, 30, 5))) +
+  theme_bw() + #+ theme(text = element_text(size=15))
+  theme(text = element_text(size=13),
+        legend.text = element_text(size = 13),
+        legend.position = "bottom")
+
+
+model_fit_plot
+```
+
+
+# Inference on basic reproduction number, critical vaccination coverage level and the herd immunity threshold
+
+See relevant section in main text for details.
+
+## Basic reproduction number
+
+By the next generation matrix method (see Section S4, Supplementary material),
+
+
+\begin{equation}
+R_0 = \dfrac{\beta}{\eta \gamma}.
+\end{equation}
+
+<!-- \eta = proportion that do not experience a relapse = 1 - propRelapse -->
+
+Compute estimates for $R_0$ with lower and upper confidence limits. 
+
+```{r ro-estimates}
+# Parameter sets which satisfy confidence threshold
+LHS <- trajectory_for_all_combinations$LHS
+x0 <- LHS[keep_indices, ]
+
+# Ro estimate corresponding to maximum likelihood estimates
+fp <- fixed_params
+r0_estimate <- beta_function(x = ci[c("a", "b", "c" , "d"), 
+                                    "MLE_estimate"])*fp["durI", 1]/(1-fp["propRelapse", 1])
+
+
+# Confidence bounds 
+
+# Beta values computed from parameter sets which satisfy confidence threshold
+beta_values <- apply(x0, 1, beta_function)
+beta_sequence <- beta_function(x = ci[c("a", "b", "c", "d"), 
+                                      "MLE_estimate"])
+
+beta_estimate <- beta_sequence[1] # MLEs
+
+lower_beta <- apply(beta_values, 1, min)[1] 
+upper_beta <- apply(beta_values, 1, max)[1] 
+
+beta_estims <- data.frame(beta = c("Estimate", "Lower", "Upper"),
+                          Value = c(beta_estimate, lower_beta, upper_beta))
+
+
+#knitr::kable(beta_estims)
+
+
+
+# Resulting R0 values computed from parameter sets which satisfy confidence threshold
+r0_values <- beta_values*fp["durI", 1]/(1-fp["propRelapse", 1])
+lower_r0 <- apply(r0_values, 1, min)
+upper_r0 <- apply(r0_values, 1, max)
+
+
+
+# R0 estimates 
+r0_estimate_ascent <-r0_estimate[1] 
+lower_r0_ascent <- lower_r0[1] 
+upper_r0_ascent <- upper_r0[1] 
+
+
+r0_estims <- data.frame(R0 = c("Estimate", "Lower", "Upper"),
+                        Value = c(r0_estimate_ascent, lower_r0_ascent, upper_r0_ascent))
+
+# Display 
+knitr::kable(r0_estims)
+```
+
+
+## Herd immunity threshold, $\psi$ 
+
+
+\begin{equation}
+\psi = 1 - \dfrac{1}{R_0}
+\end{equation}
+
+
+```{r psi}
+psi_estimate <- 1 - 1/r0_estimate_ascent
+psi_lower <-  1 - 1/lower_r0_ascent
+psi_upper <-  1 - 1/upper_r0_ascent
+
+knitr::kable(data.frame(herd_imm_thresh = c("Estimate", "Lower", "Upper"),
+                        Value = c(psi_estimate,psi_lower, psi_upper)))
+```
+
+
+
+
+## Critical vacccination coverage level, $V_c$ 
+
+\begin{equation}
+V_c = \dfrac{\psi}{\tau}.
+\end{equation}
+
+$\tau = 0.90$: vaccine efficacy among PEH/PWUD. 
+
+```{r vc}
+tau <- 0.90 
+
+vc_estimate <- (psi_estimate)/tau
+vc_lower <-  (psi_lower)/tau
+vc_upper <-  (psi_upper)/tau
+
+knitr::kable(data.frame(crit_vacc_thresh = c("Estimate", "Lower", "Upper"),
+                        Value = c(vc_estimate, vc_lower, vc_upper)))
+```
+
+
+# Plot of $\beta$ sequence 
+
+See Supplementary section S2. 
+
+```{r beta-seq}
+# Define weeks (start and end of outbreak)
+wk_labels <- seq(as.Date("2017-09-03"), as.Date("2019-05-26"), by="week") 
+wk_labels <- format(strptime(as.character(wk_labels),  format = "%Y-%m-%d" ), "%d/%m/%y")
+
+
+df_beta_seq <- data.frame(beta = beta_sequence, 
+                          Week = 1:69, 
+                          Weeks = wk_labels[1:69])
+
+saveRDS(df_beta_seq, file = "./results/df_beta_seq.RDS")
+```
+
+```{r beta-seq-1, eval = FALSE}
+# Load beta sequence plot data 
+df_beta_seq <- readRDS(file =  "./results/df_beta_seq.RDS")
+```
+
+```{r beta-seq-2, fig.align ="center", fig.cap = "Evolution of the effective contact rate in the HAV transmission model (Supplementary Figure S2)", fig.height = 5}
+
+
+# Plot
+beta_seq_plot <- ggplot(data = df_beta_seq)+
+  geom_point(aes(x = Week, y = beta_sequence), size = 2) + 
+  scale_x_continuous(name = "Week",
+                     breaks = c(0, seq(10, 70, by=10)),
+                     labels = df_beta_seq$Weeks[c(1, seq(10, 60, by=10), 69)]) + 
+  scale_y_continuous(limits = c(0, 0.7)) +
+  labs(y = expression(beta[1](t))) + 
+  theme_bw()  + 
+  theme(axis.text.x = element_text(size = 14, angle = 45, hjust = 0.9, vjust = 0.9), 
+        axis.title = element_text(size = 14),
+        axis.text.y = element_text(size = 14))
+
+beta_seq_plot
+
+
+
+# Save
+# png(filename="./figs/for_paper/beta_sequence_final.png",  res = 1000, height = 6, width = 8, units = "in")
+# beta_sequence_plot
+# dev.off()
+```
+
+
+
+
+# Fit model with constant value of $\beta$
+
+## Parameter estimation 2
+
+We estimate the following parameters by MLE assuming a Poisson likelihood for the observed data.
+
+* $\beta$  (transmission rate)
+* $I_0$ (number of infected individuals in week 0)
+
+Parameter estimates: 
+
+```{r perform-estimation-single-beta}
+
+# List parameters and bounds
+
+estimated_parameters_0 <- c("beta",    "I0")
+
+```
+
+```{r  perform-estimation-single-beta-2}
+
+# Optimization bounds 
+lower <- c(1e-2,   1e-2)
+upper <- c(5,    10)
+x0 <- c( 0.6, 0.93)
+
+# Perform estimation
+param_estims_0 <- nloptr::bobyqa(x0 = log(x0),
+                                 lower = log(lower),
+                                 upper = log(upper),
+                                 fn = calib.function_old,
+                                 nl.info = F,  
+                                 N = mean(N_vec),
+                                 ydata = casecountperwk)
+
+
+param_estims_0
+exp(param_estims_0$par)
+saveRDS(param_estims_0, file = "./results/param_estims_0.RDS")
+```
+
+```{r estimates-single-beta-model, eval = FALSE}
+# Load estimates obtained from single beta model
+param_estims_0 <- readRDS(file = "./results/param_estims_0.RDS")
+# Display
+knitr::kable(data.frame(Parameter = estimated_parameters_0,
+                        MLE =   exp(param_estims_0$par)))
+```
+
+
+
+
+<!-- ## Profile likelihood-based confidence intervals  -->
+
+```{r pl-based-confidence-intervals-single-beta}
+
+# Load parameter estimates 
+#param_estims_0 <- readRDS(file = "./results/param_estims_0.RDS")
+opt <- exp(param_estims_0$par)
+opt
+
+
+
+#  Parameter names
+parameters <- c("beta",  "I0", "durL", 'durI', 'fracImmune', 'durRem', 'propRelapse', "omega") # The order matters! 
+upper.cal <- c( 5,      10,      NA,       NA,         NA,     NA,                NA, NA)
+lower.cal <- c( 1e-3, 1e-2,    NA,      NA,            NA,    NA ,               NA, NA) 
+
+
+
+estimated_parameters_0 <- c( "beta", "I0")
+
+
+# Insert fixed parameter values in vector of calibrated values
+
+# Identify indices of fixed parameters
+ind <- c()
+for (fixed_parameter in fixed_parameters) {
+  ind <- c(ind, which(parameters==fixed_parameter))
+}
+
+# Insert corresponding fixed values based on positions
+
+for (i in 1:length(ind)){
+  full_vector <- R.utils::insert(opt, ind[i], fixed_parameter_values[i])
+  full_vector -> opt
+}
+
+# Construct summary data frame
+pul <- data.frame(parameter = parameters,
+                  lower.bound = lower.cal, # This is to profile over the same interval we calibrate 
+                  upper.bound = upper.cal,
+                  index = 1:length(parameters),
+                  opt = full_vector)
+pul <-  fix.parameters(to_fix = fixed_parameters,
+                       fixed_values = fixed_parameter_values)
+
+
+
+#### PL COMPUTATONS FOR PARAMETERS ####
+
+chain <- T   # Use chain-like algorithm where the parameter estimates at the previous iteration is used as starting point at the current iteration.
+
+
+res1 <- pl_function_old(p.vec = "beta",
+                        pvl = list(beta = c(seq(0.01,
+                                                0.60,
+                                                by = 0.01), 0.7, 0.8, 0.9, 1.0)))
+
+# save(res1,
+#      file = here::here("results", "res1.rda"))
+
+
+
+res2 <- pl_function_old(p.vec = "I0",
+                        pvl = list(I0 = c(seq(1,
+                                              10,
+                                              by  = 0.5))))
+
+#save(res2, file = here::here("results", "res2.rda"))
+
+
+# Save
+parameter_profiles_0 <- list(res1, res2)
+saveRDS(parameter_profiles_0, file = "./results/parameter_profiles_0.RDS")
+
+
+```
+
+```{r pl-based-confidence-intervals-single-beta-2, eval = FALSE}
+
+#### PROFILE RESULTS  #####
+parameter_profiles_0 <- readRDS(file = "./results/parameter_profiles_0.RDS")
+profile_results_0 <- lapply(parameter_profiles_0, function (x) profile_function(x, log=F, plot=FALSE)) # 
+
+
+##### COMPUTE CONFIDENCE INTERVALS #####
+min_llk_0 <- param_estims_0$value              # Minimum negative log likelihood value
+cutoff_0 <- min_llk_0 + qchisq(p=0.95,df=length(estimated_parameters_0))/2  # Cut off
+
+#min_llk_0;cutoff_0
+# 95% simultaneous confidence intervals:
+ci_0<- data.frame(matrix(NA, nrow= length(estimated_parameters_0), ncol = 3), row.names = estimated_parameters_0)
+for (i in c(1:length(estimated_parameters_0))){
+  ci_0[i, 1:2] <- range(subset(profile_results_0[[i]]$df, llk_values<cutoff_0)$profile_values)
+}
+
+ci_0[,3] <- exp(param_estims_0$par)
+colnames(ci_0) <- c("95%lower", "95%upper", "MLE_estimate")
+#ci
+
+# Display
+# knitr::kable(ci_0)
+```
+
+
+## Compute confidence region for outbreak trajectory
+
+```{r lhs-0-1}
+# Steps 
+#1. Sample LHS from the parameter space 
+#2. For each parameter combination, compute the model trajectory and the likelihood
+#3. Keep the likelihoods that are below the confidence cutoff
+#4. And plot min and max 
+
+#### 1. Sample LHS ###
+inputs <- c('beta',
+            "I0",
+            "N")
+
+#Set seed for reproducibility
+
+set.seed(1432)
+LHS_0 <- randomLHS(n = 1000, k = length(inputs))
+colnames(LHS_0) <- inputs
+
+
+# Transform to desired distribution
+
+LHS_0[, "beta"] <- qunif(LHS_0[, "beta"], 0.30, 0.60)
+LHS_0[, "I0"] <- qunif(LHS_0[, "I0"], 6.00, 9.00)
+LHS_0[, "N"] <- qunif(LHS_0[, "N"], 59222, 80501)
+
+### 2. For each parameter combination, compute the model trajectory and the likelihood (note: computationally intensive)###
+
+trajectory_for_all_combinations_0 <- calc.mod.estims_old(x = LHS_0, 
+                                                         compute.likelihood = TRUE,
+                                                         nsim = 1000)
+
+
+saveRDS(trajectory_for_all_combinations_0, file = "./results/trajectory_for_all_combinations_0.RDS")
+
+```
+
+
+```{r lhs-0-2, eval=FALSE}
+trajectory_for_all_combinations_0 <- readRDS(file = "./results/trajectory_for_all_combinations_0.RDS") # Load result from previous chunk
+```
+
+
+```{r lhs-0-3}
+#3. Keep the likelihoods that are below the confidence cutoff
+keep_indices_0 <- which(trajectory_for_all_combinations_0$NLLK < cutoff_0)
+#summary(trajectory_for_all_combinations_0$NLLK)
+
+# Obtain trajectories that satisfy the likelihood cutoff
+traj_less_than_cutoff_0 <- trajectory_for_all_combinations_0$FC[, keep_indices_0]
+```
+
+
+## Model plot 
+
+```{r model-plot-0}
+
+################# PLOT MODEL ESTIMATES #####################
+
+param_values_0 <-  matrix(c(ci_0$MLE_estimate, mean(N_vec)),  nrow = 1, ncol = length(estimated_parameters_0) +1)
+colnames(param_values_0) <- c(estimated_parameters_0, "N")
+
+mle_fit_0 <- calc.mod.estims_old(x = param_values_0, nsim = 1, compute.likelihood = TRUE)
+
+
+# Organize data into frame
+df_model_plot_0 <- data.frame(week = c(1:length(casecountperwk)),
+                              model = as.vector(mle_fit_0$FC),
+                              low = as.vector(apply(traj_less_than_cutoff_0, 1, min)), 
+                              high = as.vector(apply(traj_less_than_cutoff_0, 1, max)), 
+                              middle = as.vector(apply(traj_less_than_cutoff_0, 1, quantile, probs = c(0.50))),
+                              observed = casecountperwk)
+
+saveRDS(df_model_plot_0, file = "./results/df_model_plot_0.RDS")
+```
+
+
+```{r model-plot-0-1, eval = FALSE}
+# Load plot data
+df_model_plot_0 <- readRDS(file = "./results/df_model_plot_0.RDS")
+
+```
+
+```{r model-plot-0-2, fig.align ="center", fig.cap = "Model fit with a single effective constant rate (Suppelementary Figure S3)", fig.height= 5}
+
+# Plot
+
+model_fit_plot_single_beta <- ggplot(df_model_plot_0, aes(x = week, y=observed))+
+  geom_point(shape = 19, size = 2, (aes(color="Data"))) +
+  geom_ribbon(aes(x=week, ymin=low, ymax = high), fill = "lightblue", alpha = 0.6) +
+  geom_line(aes(x= week, y = middle, color = "Model"), lwd = 1) +
+  scale_colour_manual(name='', values=c("Data" ="black", "Model"= "darkblue")) +
+  guides(colour = guide_legend(override.aes = list(shape=c(16,NA),  linetype=c(NA,1)))) +
+  labs(x = "Time (weeks)", y = "Number of detected incident cases") +
+  #scale_x_continuous(limits=c(0, 14), breaks=c(0,7,14)) +
+  scale_y_continuous(limits=c(0,30), breaks=c(seq(0, 30, 5))) +
+  theme_bw() + #+ theme(text = element_text(size=15))
+  theme(text = element_text(size=13),
+        legend.text = element_text(size = 13),
+        legend.position = "bottom")
+
+
+model_fit_plot_single_beta 
+
+# Save
+# jpeg(file="./figs/for_paper/model_fit_0.jpeg",  res = 800, height = 6, width = 8, units = "in")
+# model_fit_plot_single_beta
+# dev.off()
+```
+
+
+# Impact of vaccination program and timing 
+
+See relevant section in the main text for details
+
+## 1. Compute model fits for the vaccination scenarios 
+
+
+```{r vacc-scenarios}
+
+# As observed (week 21) 
+
+model.fit.wk.21 <- mle_fit                                           # Model fit
+model.fit.wk.21_confint <- traj_less_than_cutoff                     # Confidence interval 
+
+# Set of parameters satisfying the confidence threshold
+x0 <- LHS[keep_indices, ]
+
+# No vaccination
+
+model.fit.NV <- calc.mod.estims(x = param_values, vacnumperwk = numeric(69), nsim = 1)
+model.fit.NV_confint <- calc.mod.estims(x = x0, vacnumperwk = numeric(69), nsim = nrow(x0)) # Where x0 is the set of parameters satisfying the confidence threshold
+
+# Vaccination start in week 10
+
+shiftvacnumperwkLV10 <- data.table::shift(vaccdata, n=11L, fill=0, type=c("lead"), give.names=FALSE)
+model.fit.wk.10 <-calc.mod.estims(x = param_values, vacnumperwk = shiftvacnumperwkLV10, nsim = 1)
+model.fit.wk.10_confint <- calc.mod.estims(x = x0, vacnumperwk = shiftvacnumperwkLV10, nsim = nrow(x0))
+
+
+# Vaccination start in week 18
+
+shiftvacnumperwkLV18 <- data.table::shift(vaccdata, n=3L, fill=0, type=c("lead"), give.names=FALSE)
+model.fit.wk.18 <-calc.mod.estims(x = param_values, vacnumperwk = shiftvacnumperwkLV18, nsim =1)
+model.fit.wk.18_confint <- calc.mod.estims(x = x0, vacnumperwk = shiftvacnumperwkLV18, nsim = nrow(x0))
+
+
+# Vaccination starts in week 10 but faster, at a double rate
+a <- multiply.vacc.counts(v = shiftvacnumperwkLV10, multiplier = 2)
+
+if(sum(a) != sum(shiftvacnumperwkLV10)){
+  a[23] <- sum(shiftvacnumperwkLV10) - sum(a[1:22]) # Do this to obtain exact number of observed vaccinations
+}
+# Check that this is true 
+#sum(a) == sum(vaccdata)
+
+
+shiftdoublevacnumperwkLV10 <- a
+model.fit.wk.10d <-calc.mod.estims(x = param_values, vacnumperwk = shiftdoublevacnumperwkLV10, nsim =1)
+model.fit.wk.10d_confint <- calc.mod.estims(x = x0, vacnumperwk = shiftdoublevacnumperwkLV10, nsim = nrow(x0))
+
+
+
+
+# Save all scenario predictions
+save(model.fit.wk.21,
+     model.fit.wk.21_confint,
+     model.fit.NV,
+     model.fit.NV_confint,
+     model.fit.wk.10,
+     model.fit.wk.10_confint,
+     model.fit.wk.18,
+     model.fit.wk.18_confint,
+     model.fit.wk.10d,
+     model.fit.wk.10d_confint,
+     file = "./results/vaccination_scenario_estimates.rda")
+
+
+
+```
+
+```{r load-vacc-scenarios-2, eval = FALSE}
+# Load prediction
+load(file = "./results/vaccination_scenario_estimates.rda")
+```
+
+
+
+
+## 2. Estimate the total number of detected cases under each scenario
+
+```{r total-detec-scenarios}
+
+# MLE estimates 
+
+cases.NV <- apply(model.fit.NV$FC, 2, sum)        # No vaccination 
+cases.21 <- apply(model.fit.wk.21$FC, 2, sum)     # Onset in week 21
+cases.18 <- apply(model.fit.wk.18$FC, 2 , sum)    # Onset in week 18
+cases.10 <- apply(model.fit.wk.10$FC, 2 , sum)    # Onset in week 10
+cases.10d <- apply(model.fit.wk.10d$FC, 2 , sum)  # Onset in week 10, at double the rate
+
+
+# Confidence bounds on estimates
+
+cases.NV.confint <- apply(model.fit.NV_confint$FC, 2, sum)
+cases.21.confint  <-apply(model.fit.wk.21_confint, 2, sum)
+cases.18.confint <- apply(model.fit.wk.18_confint$FC, 2, sum) 
+cases.10.confint <- apply(model.fit.wk.10_confint$FC,2, sum) 
+cases.10d.confint <-apply(model.fit.wk.10d_confint$FC,2, sum) 
+
+
+# Collect into data frame
+
+
+total.detec.cases.scenarios <- data.frame("Vaccination_scenario" = c("None", "Wk21", "Wk18", "Wk10", "Wk10d"), 
+                                          "Number of detected cases" = round(c(cases.NV, cases.21, cases.18, cases.10, cases.10d)),
+                                          "Lower_95" = round(c(min(cases.NV.confint), min(cases.21.confint), min(cases.18.confint), min(cases.10.confint), min(cases.10d.confint))),
+                                          "Upper_95" = round(c(max(cases.NV.confint), max(cases.21.confint), max(cases.18.confint), max(cases.10.confint), max(cases.10d.confint))))
+
+# Display
+knitr::kable(total.detec.cases.scenarios)
+```
+
+
+## 3. How many **detected** cases were (or would have been) averted?
+
+```{r total-avert-detec}
+# Subtract the total number of cases under all scenarios from those under the no vaccination scenario
+
+## MLE 
+
+d.avert.21 <- cases.NV - cases.21
+d.avert.18 <- cases.NV - cases.18
+d.avert.10 <- cases.NV - cases.10
+d.avert.10d <- cases.NV - cases.10d
+
+
+## Confidence bounds on the number of detected cases averted.
+
+### T2: Subtract the raw figures and compute the confidence intervals 
+
+d.avert.21.confint <-  cases.NV.confint - cases.21.confint
+d.avert.18.confint <-  cases.NV.confint - cases.18.confint
+d.avert.10.confint <-  cases.NV.confint - cases.10.confint
+d.avert.10d.confint <-  cases.NV.confint - cases.10d.confint
+
+
+
+# Collect into data frame 
+total.avert.cases.scenarios <- data.frame("Vaccination_scenario" = c("Wk21", "Wk18", "Wk10", "Wk10d"), 
+                                          "Number of averted detected cases" = round(c(d.avert.21, d.avert.18, d.avert.10, d.avert.10d)),
+                                          "Lower_95" = round(c(min(d.avert.21.confint), min(d.avert.18.confint), min(d.avert.10.confint), min(d.avert.10d.confint))),
+                                          "Upper_95" = round(c(max(d.avert.21.confint), max(d.avert.18.confint), max(d.avert.10.confint), max(d.avert.10d.confint))))
+
+
+# Display
+knitr::kable(total.avert.cases.scenarios)
+
+```
+
+
+
+
+## 4. How many **hospitalizations** were (or would have been) averted?
+
+
+We use the hospitalization rate observed among PEH/PWUD: 66.2% (see Main text).
+
+
+```{r hosp-averted}
+
+hosp.rate.observed <- 0.662
+
+
+# MLE 
+hosp.21 <- d.avert.21*hosp.rate.observed
+hosp.18 <- d.avert.18*hosp.rate.observed
+hosp.10 <- d.avert.10*hosp.rate.observed
+hosp.10d <- d.avert.10d*hosp.rate.observed
+
+
+
+
+## Confidence bounds 
+
+hosp.21.confint <- d.avert.21.confint*hosp.rate.observed
+hosp.18.confint <- d.avert.18.confint*hosp.rate.observed 
+hosp.10.confint <- d.avert.10.confint*hosp.rate.observed 
+hosp.10d.confint <- d.avert.10d.confint*hosp.rate.observed 
+
+
+
+# Collect into data frame 
+total.avert.hosp.scenarios <- data.frame("Vaccination_scenario" = c("Wk21", "Wk18", "Wk10", "Wk10d"), 
+                                         "Number of averted hospitalizations" = round(c(hosp.21, hosp.18, hosp.10, hosp.10d)),
+                                         "Lower_95" = round(c(min(hosp.21.confint), min(hosp.18.confint), min(hosp.10.confint), min(hosp.10d.confint))),
+                                         "Upper_95" = round(c(max(hosp.21.confint), max(hosp.18.confint), max(hosp.10.confint), max(hosp.10d.confint))))
+
+
+knitr::kable(total.avert.hosp.scenarios)
+```
+
+
+## 5. What is the associated **cost saving**?
+
+```{r cost-savings}
+#Hospitalization costs pp, Hofmeister et al. (2020) estimate : $16,232 (2017 US dollars).
+# Cost per person
+costpp <- 16232
+
+
+# MLE 
+savings.21 <- hosp.21*costpp
+savings.18 <- hosp.18*costpp
+savings.10 <- hosp.10*costpp
+savings.10d <- hosp.10d*costpp
+
+
+# Confidence bounds 
+
+
+savings.21.confint <- hosp.21.confint*costpp
+savings.18.confint <- hosp.18.confint*costpp
+savings.10.confint <- hosp.10.confint*costpp
+savings.10d.confint <- hosp.10d.confint*costpp
+
+
+
+# Collect into data frame 
+total.cost.savings.scenarios <- data.frame("Vaccination_scenario" = c("Wk21", "Wk18", "Wk10", "Wk10d"), 
+                                           "Cost savings" = round(c(savings.21, savings.18, savings.10, savings.10d)),
+                                           "Lower_95" = round(c(min(savings.21.confint), min(savings.18.confint), min(savings.10.confint), min(savings.10d.confint))),
+                                           "Upper_95" = round(c(max(savings.21.confint), max(savings.18.confint), max(savings.10.confint), max(savings.10d.confint))))
+
+
+total.cost.savings.scenarios[, 2:4] <- round(total.cost.savings.scenarios[, 2:4]/1000000, 2) # Convert to millions of US$
+
+knitr::kable(total.cost.savings.scenarios)
+```
+
+
+
+
+
+## 6. Plot comparing vaccination scenarios
+
+```{r vacc-scenarios-3}
+
+# Collect results into data frame 
+# For each vaccination scenario, plot the number of cases for each day
+
+df_vacc_scenarios <- data.frame(week = 1:length(casecountperwk),
+                                NV = model.fit.NV$FC, 
+                                NV_lower = apply(model.fit.NV_confint$FC, 1, min),
+                                NV_upper = apply(model.fit.NV_confint$FC, 1, max),
+                                wk21 = model.fit.wk.21$FC,
+                                wk21_lower = apply(model.fit.wk.21_confint, 1, min),
+                                wk21_upper =  apply(model.fit.wk.21_confint, 1, max),
+                                wk18 = model.fit.wk.18$FC,
+                                wk18_lower = apply(model.fit.wk.18_confint$FC, 1, min),
+                                wk18_upper = apply(model.fit.wk.18_confint$FC, 1, max), 
+                                wk10 = model.fit.wk.10$FC,
+                                wk10_lower = apply(model.fit.wk.10_confint$FC, 1, min),
+                                wk10_upper = apply(model.fit.wk.10_confint$FC, 1, max), 
+                                wk10d = model.fit.wk.10d$FC, 
+                                wk10d_lower = apply(model.fit.wk.10d_confint$FC, 1, min),
+                                wk10d_upper = apply(model.fit.wk.10d_confint$FC, 1, max))
+
+# Save
+saveRDS(df_vacc_scenarios, file = "./results/df_vacc_scenarios.RDS")
+
+```
+
+```{r vacc-scenarios-4, eval = FALSE}
+# Load plot data 
+df_vacc_scenarios <- readRDS( file = "./results/df_vacc_scenarios.RDS")
+```
+
+```{r vacc-scenarios-5, fig.align ="center", fig.cap = "Model estimates for the weekly number 44 of detected cases under the various vaccination scenarios: no vaccination (blue line), 45 vaccination initiation in week 21 as observed (reddish brown line), week 18 (green line), and 46 week 10 with the observed coverage (brown line) and double the observed coverage (magenta 47 line). 95% confidence regions for all scenarios are shaded in corresponding colors. (Figure 3B)", fig.height= 5}
+
+# Plot vaccination scenario predictions with confidence intervals
+
+cb <- c("#4682B4", "#B4464B" ,"#B4AF46", "#B47846" ,"#7846B4")  # Colour pallete
+
+vacc_scenarios_plot <- ggplot(df_vacc_scenarios) + 
+  geom_line(aes(x = week, y = NV, colour = "No vaccination"), lwd = 1) +
+  geom_ribbon(aes(x = week, ymin = NV_lower, ymax = NV_upper, fill = "No vaccination")) +
+  
+  geom_line(aes(x = week, y = wk21, colour = "Week 21"), lwd = 1) +
+  geom_ribbon(aes(x = week, ymin = wk21_lower, ymax = wk21_upper, fill = "Week 21")) +
+  
+  geom_line(aes(x = week, y = wk18, colour = "Week 18"), lwd = 1) +
+  geom_ribbon(aes(x = week, ymin = wk18_lower, ymax = wk18_upper, fill = "Week 18")) +
+  
+  geom_line(aes(x = week, y = wk10, colour = "Week 10"), lwd = 1) +
+  geom_ribbon(aes(x = week, ymin = wk10_lower, ymax = wk10_upper, fill = "Week 10")) +
+  
+  geom_line(aes(x = week, y = wk10d, colour = "Week 10, rate doubled"), lwd = 1) +
+  geom_ribbon(aes(x = week, ymin = wk10d_lower, ymax = wk10d_upper, fill = "Week 10, rate doubled")) + 
+  scale_fill_manual(values  = c("No vaccination" =  alpha(cb[1], 0.1), 
+                                "Week 21" = alpha(cb[2], 0.1),
+                                "Week 18" = alpha(cb[3], 0.1),
+                                "Week 10" = alpha(cb[4], 0.1),
+                                "Week 10, rate doubled" = alpha(cb[5], 0.1)),
+                    limits = c("No vaccination",
+                               "Week 21",
+                               "Week 18",
+                               "Week 10",
+                               "Week 10, rate doubled"),
+                    guide = FALSE)   +
+  
+  scale_color_manual(values= c("No vaccination" = cb[1],
+                               "Week 21" = cb[2],
+                               "Week 18" = cb[3],
+                               "Week 10" = cb[4],
+                               "Week 10, rate doubled" = cb[5]), 
+                     limits = c("No vaccination",
+                                "Week 21",
+                                "Week 18",
+                                "Week 10",
+                                "Week 10, rate doubled")) +
+  theme_bw()+
+  labs(fill=" ",col="Scenario",title="", x = "Time (weeks)", y = "Number of detected cases") +
+  scale_y_continuous(limits = c(0, 30),
+                     breaks = seq(0, 30, 5)) +
+  theme(text = element_text(size=13),
+        legend.text = element_text(size = 13), 
+        legend.position = "bottom") +
+  guides(col = guide_legend(ncol=2))
+
+
+
+vacc_scenarios_plot
+
+# Save
+# png(filename = "./figs/for_paper/vacc-scenarios-with-CIs.png", res = 300, width = 8, height = 6, units = "in")
+# vacc_scenarios_plot
+# dev.off()
+# 
+```
+
+
+
+
+<!-- # Final plots  -->
+
+<!-- ## Combine model fit and vaccination plots  -->
+
+
+<!-- ```{r model-results-plots, fig.align ="center", fig.cap = "Model fit and vaccination scenarios (Figure 3)", fig.height= 8} -->
+
+<!-- #png(filename = "./figs/for_paper/model_plots_final.png", res = 300, width = 6, height = 8, units = "in") -->
+<!-- ggpubr::ggarrange(model_fit_plot,  -->
+<!--                   vacc_scenarios_plot, -->
+<!--                   ncol = 1, -->
+<!--                   nrow= 2, -->
+<!--                   labels = LETTERS[1:2]) -->
+<!-- #dev.off() -->
+<!-- ``` -->
+
+
+
+
+
+# Sensitivity analysis 
+
+See Supplementary Section S5. 
+
+## Compute Sobol' sensitivity indices
+
+```{r sobol-indices}
+
+# 1. Define parameters and sample size
+
+N <- 2 ^ 10    # Number of parameter sets 
+
+params <-  c('a',
+             'b',
+             'c',
+             'd',
+             'I0', 
+             'durL',
+             'durI',
+             'fracImmune',
+             'durRem',
+             'propRelapse',
+             'N')               # Parameters included in analysis
+R <- 10^3 
+type <- "percent"              # for bootstrap confidence interval 
+conf <- 0.95                   # confidence level
+
+
+
+# 2. Create a sample matrix 
+# Parameter sequences are generated using the Sobol sequence (quasi-random number generators)
+mat <- sensobol::sobol_matrices(N = N, params = params) # Parameter sets, a column for a parameter, a row for a parameter set
+
+set.seed(1423)   # Set seed for reproducibility
+
+# Vary parameters by 20% of their mean value (either estimated or fixed)
+
+mat[, "a"] <- qunif(mat[, "a"], vary(0.61)[1], vary(0.61)[2])   
+mat[, "b"] <- qunif(mat[, "b"], vary(0.12)[1], vary(0.12)[2])
+mat[, "c"] <- qunif(mat[, "c"], vary(0.75)[1], vary(0.75)[2]) 
+mat[, "d"] <- qunif(mat[, "d"], vary(37)[1], vary(37)[2])   # ************
+mat[, "I0"] <- qunif(mat[, "I0"], vary(0.92)[1], vary(0.92)[2])
+mat[, "durL"] <- qunif(mat[, "durL"], vary(1.57)[1], vary(1.57)[2])
+mat[, "durI"] <- qunif(mat[, "durI"], vary(4.64)[1], vary(4.64)[2])                  
+mat[, "fracImmune"] <- qunif(mat[, "fracImmune"],vary(0.43)[1], vary(0.43)[2])  
+mat[, "durRem"] <- qunif(mat[, "durRem"], vary(4.30)[1], vary(4.30)[2])             
+mat[, "propRelapse"] <- qunif(mat[, "propRelapse"],vary(0.12)[1], vary(0.12)[2]) 
+mat[, "N"] <- qunif(mat[, "N"], vary(69862)[1], vary(69862)[2])
+
+```
+
+```{r sobol-indices-2}
+
+# 3. Compute model output for each row of 'mat'
+# Note: computationally intensive. Run on cluster if possible
+model_results_sobol_sets <- calc.mod.estims(x = mat, fp = t(mat), nsim = nrow(mat), sensitivity.analysis = TRUE, compute.likelihood = TRUE)
+saveRDS(model_results_sobol_sets, file = "./results/model_results_sobol_sets.RDS")
+```
+
+```{r sobol-indices-3}
+
+# Load relevant data
+
+model_results_sobol_sets <- readRDS(file = "./results/model_results_sobol_sets.RDS")
+
+
+# Compute the output of interest; that is, the total number of observed detected cases at the end of the outbreak).
+out2_1 <- apply(model_results_sobol_sets$FC, 2, sum)
+
+
+#length(out2_1)
+#summary(out2_1)
+
+# 4. Compute Sobol' indices
+# Use the defaults in package in keeping with best practices in sensitivity: 
+# analysis,(see pg 8, Puy et al. (2021) first = "saltelli:, total = "jansen" , matrices = c("A", "B", "AB"))
+s2_ind1 <- sensobol::sobol_indices(Y = out2_1, N = N, params = params, boot = TRUE, R = R,
+                                   type = type, conf = conf)
+
+
+
+# 5. Plot Sobol indices
+
+# Compute the indices of a dummy parameter to gauge the approximation error
+# and serve as a benchmark for defining non-influential variables
+ind.dummy.1 <- sobol_dummy(Y = out2_1, N = N, params = params, boot = TRUE, R = R)
+
+
+# Collect results into dataframe
+df_sobol <- data.frame(indices = s2_ind1$results$original,
+                       parameters = s2_ind1$results$parameters,
+                       low.ci = s2_ind1$results$low.ci,
+                       high.ci = s2_ind1$results$high.ci,
+                       sensitivity = s2_ind1$results$sensitivity)
+
+# saveRDS(df_sobol, file = "./results/df_sobol.RDS")
+
+```
+
+
+
+```{r sobol-indices-4, fig.align ="center", fig.cap = "Sobol' sensitivity indices for selected parameters (Supplementary Figure S4)", fig.height= 5}
+# Plot 
+
+sensitivity_plot <- ggplot(data=df_sobol, aes(x = reorder(parameters, -indices), y = indices, fill = sensitivity))+
+  geom_bar(stat = "identity", position = position_dodge()) +
+  labs(x = "Parameters", y = "Sobol' index")+
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  scale_x_discrete(labels = c(expression(beta[s]),
+                              expression(epsilon),
+                              expression(1/gamma),
+                              expression(t^{"*"}), 
+                              expression(1/alpha),
+                              expression(1~-~eta),
+                              expression(N),
+                              expression(1/sigma),
+                              expression(beta[l]),
+                              expression(c),
+                              expression(I[1](0))
+                              
+  )) +
+  theme(axis.text.x = element_text(size = 14),
+        axis.text.y = element_text(size = 14),
+        legend.text = element_text(size = 14),
+        legend.title = element_text(size = 14),
+        axis.title.x = element_text(size = 14),
+        axis.title.y = element_text(size = 14)) +
+  geom_errorbar(aes(ymin = low.ci, ymax = high.ci), width = 0.5,  position=position_dodge(.9))+       # Add error bounds and dummy lines
+  geom_hline(yintercept = ind.dummy.1$high.ci[ind.dummy.1$sensitivity == "Si"], linetype = "dashed", color = '#4682B4', size = 1) +
+  geom_hline(yintercept =  ind.dummy.1$high.ci[ind.dummy.1$sensitivity == "Ti"], linetype = "dashed", color = '#B47846', size = 1) +
+  scale_fill_manual(name = "Sensitivity",
+                    values = c("Si" ="#4682B4", "Ti" = '#B47846'),
+                    labels = c(expression(S[i]),
+                               expression(T[i])))
+
+
+
+# Save plot
+#png(filename = "./figs/for_paper/sobol_all_parameters_final.png", width = 8, height = 6, res = 1000, unit ="in")
+sensitivity_plot
+#dev.off()
+
+```
+
+
+
+```{r sobol-indices-5, fig.align ="center", fig.cap = "Scater plots of the number of detected cases by the end of the outbreak against the three most influential parameters per the sensitivity analysis (Suppelementary Figure S5)", fig.height= 5, warning=FALSE}
+# 6. How does the model output match to the input space? (Figure S5, supplementary material)
+# We consider the top three parameters with the highest Sobol' sensitivity indices. 
+
+# png(filename = "./figs/for_paper/scatter_three_params_total_detect_20_percent.png", width = 6, height = 3, res = 800, unit ="in")
+plot_scatter2(data = mat, N = N, Y = out2_1, params = c("a", "fracImmune", "durI")) +
+  labs (y = "Total number of detected cases", x = "Values")
+#dev.off()
+```

@@ -1,0 +1,401 @@
+---
+title: "HAV outbreak in Louisville - relative risk comparison"
+author: "Emmanuelle Dankwa"
+date: "08/10/2021"
+output:
+  bookdown::html_document2:
+    df_print: paged
+    number_sections: yes
+    toc: yes
+    toc_depth: 2
+    toc_float:
+      collapsed: no
+  pdf_document:
+    toc: yes
+    toc_depth: '2'
+---
+
+
+# Set up 
+
+
+NOTE: 
+
+1. The analyses in this file reproduces the results in Table 3, Supplementary Tables S1-S3 and Supplementary Figure S1.
+
+2. Please set directory to the "risk_analysis" folder . 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+
+# Load packages
+library(fmsb)       # Computation of  relative risk ratio and testing hypothesis
+
+# Import data and source functions
+
+# Data on general population
+dat2 <- readRDS(file = "./risk_analysis_data/dat2.RDS")                # Full
+dat2_yrwk <- readRDS(file = "./risk_analysis_data/dat2_yrwk_all.RDS")  #  Summarized
+
+# Weekly case count among PEH/PWUD (=risk group)
+target <- readRDS(file = "./risk_analysis_data/target.RDS")                 # Full 
+target_yrwk <- readRDS(file = "./risk_analysis_data/target_yrwk.RDS") # Summarized 
+
+# Source functions
+
+source("risk_analysis_functions.R")
+```
+
+
+#  Analysis of risks among subpopulations
+
+## Overview
+
+The aim of this section is to determine the population subgroup(s) which were at a higher risk at the initial stafes of the outbreak. 
+
+Following Worby et. al (2015), we utilize the relative risk (RR) in assessing the relative change in incidence before and after the peak of the epidemic among the various subgroups. If a particular subgroup, say subgroup $i$, was at a higher risk, we would expect that the proportion of cases in subgroup $i$ before the peak will be significantly greater than the proportion in the same group after the peak, assuming that reporting rates throughout the epidemic remain constant within each subgroup.
+
+Let $B_i$ represent the proportion of all **pre-peak** cases which belong to subgroup $i$ and let $A_i$ represent the proportion of **post-peak** cases which belong to group $i$. Then,
+
+$$RR(i) = \frac{B_i}{A_i}~~.$$
+For period definitions, see main text.
+
+## Definition of risk group
+
+
+We define the target group as the population subgroup who were either **experiencing homelessness or involved in drug use (non-intravenous & intravenous) during the outbreak (PEH/PWUD)**.
+
+
+## Relative risk comparison
+
+### PEH/PWUD vs non-PEH/PWUD
+
+```{r include=F}
+
+
+######### GENERAL, cases in each period #################
+
+# Number of cases peak, pre-peak and post-peak #
+
+totalprepeak <- sum(dat2_yrwk$numcases[1:31]) # Number of pre-peak cases 
+totalpeak <- sum(dat2_yrwk$numcases[32:34]) # Number of peak cases  
+totalpostpeak<- sum(dat2_yrwk$numcases[35:91]) # Number of post-peak cases
+
+totalprepeak;totalpeak;totalpostpeak
+
+sum(totalprepeak, totalpeak, totalpostpeak)
+
+
+
+######### RISK, Cases in each period #################
+
+
+totalprepeak_riskgroup <- sum(dat2_yrwk$targetcases[1:31]) # Number of pre-peak cases in the risk group
+totalpeak_riskgroup <- sum(dat2_yrwk$targetcases[32:34])  # Number of peak cases in the risk group 
+totalpostpeak_riskgroup  <- sum(dat2_yrwk$targetcases[35:91]) # Number of post-peak cases in the risk group 
+
+totalprepeak_riskgroup ;totalpeak_riskgroup ;totalpostpeak_riskgroup  
+
+sum(totalprepeak_riskgroup , totalpeak_riskgroup , totalpostpeak_riskgroup)
+
+
+########## Relative Risk calculations #########
+
+### PEH/PWUD Group ###
+RR_riskgroup <- riskratio(totalprepeak_riskgroup,totalpostpeak_riskgroup, totalprepeak, totalpostpeak)  
+
+
+### Other ###
+
+totalprepeak_other <-  totalprepeak -  totalprepeak_riskgroup # Number of pre-peak cases outside the risk group 
+totalpostpeak_other <- totalpostpeak - totalpostpeak_riskgroup # Number of post-peak cases outside the risk groups 
+  
+RR_other <- riskratio(totalprepeak_other, totalpostpeak_other, totalprepeak, totalpostpeak)
+
+
+# Odds Ratio: PEH/PWUD vs Other #
+
+oddsratio(a=matrix(data=c(totalprepeak_riskgroup,totalpostpeak_riskgroup,totalprepeak_other,totalprepeak_other), nrow=2, ncol = 2))
+
+```
+
+
+
+### General population
+
+#### By sex 
+
+```{r sexgeneralrr}
+
+rr_general_sex <- relative.risk.results(population = 'general', totalprepeak =  totalprepeak, totalpostpeak = totalpostpeak, var = 'sex')
+
+rr_general_sex
+
+```
+
+
+#### By age
+
+```{r ageriskanalysis}
+
+rr_general_age <- relative.risk.results(population = 'general', totalprepeak =  totalprepeak, totalpostpeak = totalpostpeak, var = 'age')
+
+rr_general_age
+
+```
+
+
+#### By housing status
+
+```{r rrhousing}
+
+# Select cases who report homelessness
+
+hml <- dat2[which(dat2$Homelessness == 'Homeless - Shelter/Streets' | dat2$Homelessness== 'Unstable Housing'), ]
+
+# Not homeless
+
+nhml <-  dat2[-which(dat2$Homelessness == 'Homeless - Shelter/Streets' | dat2$Homelessness== 'Unstable Housing'), ]
+
+# Check dimensions; check that they add up to 501 (=nrow(dat2))
+
+#nrow(hml) + nrow(nhml) == nrow(dat2)
+#sum(nrow(hml), nrow(nhml))
+
+
+# Convert to year-week-numcases format #
+
+hml <- aggregate(hml)$final_dat
+nhml <- aggregate(nhml)$final_dat
+
+
+## Relative risk calculations ##
+
+# Number of cases by period #
+hmlprepeak <- cases.by.period(hml$numcases)$prepeak # Number of pre-peak cases reporting homelessness
+hmlpostpeak <- cases.by.period(hml$numcases)$postpeak # Number of post-peak cases reporting homelessness
+nhmlprepeak <- cases.by.period(nhml$numcases)$prepeak # Number of pre-peak cases not reporting homelessness 
+nhmlpostpeak <- cases.by.period(nhml$numcases)$postpeak # Number of post-peak cases not reporting homelessness
+
+# RR - Homeless #
+
+#hmlprepeak; hmlpostpeak; hmlpostpeak
+
+RR_homeless <- riskratio(hmlprepeak, hmlpostpeak, totalprepeak_riskgroup, totalpostpeak_riskgroup)
+
+#RR_homeless$estimate
+
+# RR - Not homeless #
+
+RR_nothomeless <- riskratio(nhmlprepeak, nhmlpostpeak, totalprepeak_riskgroup, totalpostpeak_riskgroup)
+
+#RR_nothomeless
+# Odds ratio - Homeless vs not homeless #
+
+oddsratio(a=matrix(data=c(hmlprepeak, hmlpostpeak, nhmlprepeak, nhmlpostpeak), nrow=2, ncol = 2))
+
+
+
+```
+
+
+#### By drug use status
+
+```{r rrdruguse}
+
+# Drug-using
+
+dru <- dat2[which(dat2$IVDU=='Yes' | dat2$Non.IV.DU=='Yes' ), ]
+
+# Non-drug-using
+
+ndru <- dat2[-which(dat2$IVDU=='Yes' | dat2$Non.IV.DU=='Yes' ), ]
+
+# Check dimensions; check that they add up to 501 (=nrow(dat2))
+
+#sum(nrow(dru), nrow(ndru)) == nrow(dat2)
+
+
+# Convert to year-week-numcases format #
+
+dru <- aggregate(dru)$final_dat
+ndru <- aggregate(ndru)$final_dat
+
+
+## Relative risk calculations ##
+
+# Number of cases by period #
+druprepeak <- cases.by.period(dru$numcases)$prepeak # Number of pre-peak cases reporting drug use 
+drupostpeak <- cases.by.period(dru$numcases)$postpeak # Number of post-peak cases reporting drug use 
+ndruprepeak <- cases.by.period(ndru$numcases)$prepeak # Number of pre-peak cases not reporting drug use 
+ndrupostpeak <- cases.by.period(ndru$numcases)$postpeak # Number of post-peak cases not reporting drug use 
+
+# RR - Homeless #
+
+RR_drugusing <- riskratio(druprepeak, drupostpeak, totalprepeak_riskgroup, totalpostpeak_riskgroup)
+#RR_drugusing
+
+# RR - Not homeless #
+
+RR_nondrugusing <- riskratio(ndruprepeak, ndrupostpeak, totalprepeak_riskgroup, totalpostpeak_riskgroup)
+
+#RR_nondrugusing
+# Odds ratio - Drug-using vs non-drug-using #
+
+oddsratio(a=matrix(data=c(druprepeak, drupostpeak, ndruprepeak, ndrupostpeak), nrow=2, ncol = 2))
+
+
+```
+
+
+
+
+
+
+### Among PEH/PWUD
+
+
+#### By sex 
+
+```{r sexriskrr}
+
+rr_risk_sex <- relative.risk.results(population = 'risk', totalprepeak =  totalprepeak_riskgroup, totalpostpeak = totalpostpeak_riskgroup, var = 'sex')
+
+rr_risk_sex
+```
+
+
+#### By age
+
+```{r ageriskrr}
+
+
+rr_risk_age <- relative.risk.results(population = 'risk', totalprepeak =  totalprepeak_riskgroup, totalpostpeak = totalpostpeak_riskgroup, var = 'age')
+
+rr_risk_age
+
+
+```
+
+
+#### By housing status
+
+```{r rrhousing-2}
+
+# Select cases who report homelessness
+
+hml <- target[which(target$Homelessness == 'Homeless - Shelter/Streets' | target$Homelessness== 'Unstable Housing'), ]
+
+# Not homeless
+
+nhml <-  target[-which(target$Homelessness == 'Homeless - Shelter/Streets' | target$Homelessness== 'Unstable Housing'), ]
+
+# Check dimensions; check that they add up to 385 (=nrow(target))
+
+#nrow(hml);nrow(nhml)
+#sum(nrow(hml), nrow(nhml))
+
+
+# Convert to year-week-numcases format #
+
+hml <- aggregate(hml)$final_dat
+nhml <- aggregate(nhml)$final_dat
+
+
+## Relative risk calculations ##
+
+# Number of cases by period #
+hmlprepeak <- cases.by.period(hml$numcases)$prepeak # Number of pre-peak cases reporting homelessness
+hmlpostpeak <- cases.by.period(hml$numcases)$postpeak # Number of post-peak cases reporting homelessness
+nhmlprepeak <- cases.by.period(nhml$numcases)$prepeak # Number of pre-peak cases not reporting homelessness 
+nhmlpostpeak <- cases.by.period(nhml$numcases)$postpeak # Number of post-peak cases not reporting homelessness
+
+# RR - Homeless #
+
+RR_homeless <- riskratio(hmlprepeak, hmlpostpeak, totalprepeak_riskgroup, totalpostpeak_riskgroup)
+
+# RR - Not homeless #
+
+RR_nothomeless <- riskratio(nhmlprepeak, nhmlpostpeak, totalprepeak_riskgroup, totalpostpeak_riskgroup)
+
+
+# Odds ratio - Homeless vs not homeless #
+
+oddsratio(a=matrix(data=c(hmlprepeak, hmlpostpeak, nhmlprepeak, nhmlpostpeak), nrow=2, ncol = 2))
+
+
+
+```
+
+
+#### By drug use status
+
+```{r rrdruguse-2}
+
+# Drug-using
+
+dru <- target[which(target$IVDU=='Yes' | target$Non.IV.DU=='Yes' ), ]
+
+# Non-drug-using
+
+ndru <- target[-which(target$IVDU=='Yes' | target$Non.IV.DU=='Yes' ), ]
+
+# Check dimensions; check that they add up to 385 (=nrow(target))
+
+#nrow(dru);nrow(ndru)
+#sum(nrow(dru), nrow(ndru))
+
+
+# Convert to year-week-numcases format #
+
+dru <- aggregate(dru)$final_dat
+ndru <- aggregate(ndru)$final_dat
+
+
+## Relative risk calculations ##
+
+# Number of cases by period #
+druprepeak <- cases.by.period(dru$numcases)$prepeak # Number of pre-peak cases reporting drug use 
+drupostpeak <- cases.by.period(dru$numcases)$postpeak # Number of post-peak cases reporting drug use 
+ndruprepeak <- cases.by.period(ndru$numcases)$prepeak # Number of pre-peak cases not reporting drug use 
+ndrupostpeak <- cases.by.period(ndru$numcases)$postpeak # Number of post-peak cases not reporting drug use 
+
+# RR - Homeless #
+
+RR_drugusing <- riskratio(druprepeak, drupostpeak, totalprepeak_riskgroup, totalpostpeak_riskgroup)
+
+# RR - Not homeless #
+
+RR_nondrugusing <- riskratio(ndruprepeak, ndrupostpeak, totalprepeak_riskgroup, totalpostpeak_riskgroup)
+
+
+# Odds ratio - Drug-using vs non-drug-using #
+
+oddsratio(a=matrix(data=c(druprepeak, drupostpeak, ndruprepeak, ndrupostpeak), nrow=2, ncol = 2))
+
+
+```
+
+
+
+
+# Epidemic curves by risk group (Supplementary Figure S1)
+
+```{r risk-analysis-plots, fig.cap = "Epidemic curves by risk group, housing status (among PEH/PWUD) and illicit drug use (among PEH/PWUD). A) Epidemic curves for detected cases during the HAV outbreak in Louisville. Curves are plotted for all such cases (black curve), cases among PEH/PWUD (red curve) and others (blue curve). B) Epidemic curves by housing status among PEH/PWUD. Curves are plotted separately for all PEH/PWUD (black curve), PEH/PWUD cases reporting homelessness (red curve) and PEH/PWUD not reporting homelessness (blue curve). C) Epidemic curves by illicit drug use status among PEH/PWUD. Curves are plotted separately for all PEH/PWUD (black curve), PEH/PWUD cases reporting illicit drug use (red curve) and PEH/PWUD cases not reporting illicit drug use (blue curve). All: The grey-shaded portions indicate the pre-peak and post-peak periods. Curves are plotted using a 2-week moving average.", fig.height= 10, fig.width= 10}
+
+layout(matrix(c(0,1,1,0,2,2,3,3), 2, 4, byrow = TRUE))
+main.risk.plot(dat2_yrwk)
+housing.plot(target)
+druguse.plot(target)
+
+```
+
+# References
+
+1. Worby, C. J., Kenyon, C., Lynfield, R., Lipsitch, M., & Goldstein, E. (2015). Examining the role of different age groups, and of vaccination during the 2012 Minnesota pertussis outbreak. Scientific reports, 5, 13182. [doi:10.1038/srep13182](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4538373/) 
+
+
+
+
+
