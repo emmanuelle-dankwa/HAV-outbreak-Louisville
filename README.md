@@ -85,7 +85,7 @@ The `model` folder contains:
 
 To run the scripts, 
 
-1) Clone this repository to a desired location on your computer (by clicking the green "Code" button above and then "Download Zip" or other preferred option). 
+1) Download this repository to a desired location on your computer (by clicking the green "Code" button above and then "Download Zip" or other preferred option). 
 
 2) Open the project in the downloaded folder (by double-clicking the file "HAV-outbreak-Louisville.Rproj") 
 
