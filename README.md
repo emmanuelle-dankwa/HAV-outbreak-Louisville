@@ -102,4 +102,4 @@ Queries and suggestions are always welcome. Please email Emmanuelle at dankwa@st
 
 # License 
 
-MIT 
+MIT License
