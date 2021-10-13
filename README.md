@@ -85,9 +85,9 @@ The `model` folder contains:
 
 To run the scripts, 
 
-1) Fork this repository to a desired location on your computer. 
+1) Clone this repository to a desired location on your computer (by clicking the green "Code" button above and then "Download Zip" or other preferred option). 
 
-2) Open the project (by double-clicking on the file "HAV-outbreak-Louisville.Rproj") 
+2) Open the project in the downloaded folder (by double-clicking the file "HAV-outbreak-Louisville.Rproj") 
 
 3) As each section is structured as a stand-alone, you would need to first set the directory to the location of the folder for the section you desire to replicate. Example, for the transmission model, run `setwd(~\HAV-outbreak-model\model)`.
 
@@ -98,3 +98,8 @@ To run the scripts,
 # Queries
 
 Queries and suggestions are always welcome. Please email Emmanuelle at dankwa@stats.ox.ac.uk with such. 
+
+
+# License 
+
+MIT 
