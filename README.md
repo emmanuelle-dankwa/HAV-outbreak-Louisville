@@ -3,7 +3,7 @@
 The R code in this repository reproduces the results in the paper:
 
 Emmanuelle A. Dankwa, Christl A. Donnelly, Andrew F. Brouwer, Rui Zhao, Martha Montgomery, Mark K. Weng, Natasha K. Martin. 
-Estimating vaccination threshold and impact in the 2017-2019 hepatitis A virus outbreak among persons experiencing homelessness or who use drugs in Louisville, Kentucky, United States
+Estimating vaccination threshold and impact in the 2017-2019 hepatitis A virus outbreak among persons experiencing homelessness or who use drugs in Louisville, Kentucky, United States. _Vaccine_, 2021. DOI: 10.1016/j.vaccine.2021.10.001
 
 This repository has three folders for the three main analyses sections: 
 
